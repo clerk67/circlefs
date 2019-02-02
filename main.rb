@@ -5,7 +5,7 @@ require 'aws-sdk-s3'
 require 'lru_redux'
 require 'rfusefs'
 
-class CircleFS < FuseFS::FuseDir
+class Circus < FuseFS::FuseDir
 
   def initialize(options)
     @bucket = options[:bucket]
@@ -14,6 +14,7 @@ class CircleFS < FuseFS::FuseDir
     ttl = options[:cache_ttl] || 300
     @client = Aws::S3::Client.new({ region: @region })
     @cache = LruRedux::TTL::ThreadSafeCache.new(max_size, ttl)
+    @logger = Logger.new(STDERR, progname: self.class.name)
   end
 
   def can_delete?(path)
@@ -32,22 +33,27 @@ class CircleFS < FuseFS::FuseDir
     true
   end
 
-  def contents(path)
+  def contents(path, delimiter = '/')
     prefix = path.sub(/^\//, '')
-    prefix << '/' if path != '/'
+    prefix << '/' unless path == '/'
+    @logger.debug("LIST   s3://#{@bucket}/#{prefix}")
     resp = @client.list_objects_v2({
       bucket: @bucket,
-      delimiter: '/',
+      delimiter: delimiter,
       prefix: prefix,
     })
-    files = resp.contents.map do |item|
+    files = resp.contents
+    if delimiter == '/'
+      files.reject! { |item| item.key == prefix }
+    end
+    files.map! do |item|
       @cache[item.key] = {
         directory?: false,
         file?: true,
         size: item.size,
         times: Array.new(3, item.last_modified),
       }
-      File.basename(item.key)
+      delimiter == '/' ? File.basename(item.key) : item.key
     end
     directories = resp.common_prefixes.map do |item|
       @cache[item.prefix.sub(/\/$/, '')] = {
@@ -56,15 +62,20 @@ class CircleFS < FuseFS::FuseDir
         size: 0,
         times: INIT_TIMES,
       }
-      File.basename(item.prefix)
+      delimiter == '/' ? File.basename(item.prefix) : item.prefix
     end
     files + directories
   end
 
   def delete(path)
+    key = path.sub(/^\//, '')
+    if @cache.has_key?(path.sub(/^\//, ''))
+      key << '/' if @cache[path.sub(/^\//, '')][:directory?]
+    end
+    @logger.debug("DELETE s3://#{@bucket}/#{key}")
     resp = @client.delete_object({
       bucket: @bucket,
-      key: path.sub(/^\//, ''),
+      key: key,
     })
   end
 
@@ -88,6 +99,7 @@ class CircleFS < FuseFS::FuseDir
 
   def getattr(path)
     begin
+      @logger.debug("HEAD   s3://#{@bucket}/#{path.sub(/^\//, '')}")
       resp = @client.head_object({
         bucket: @bucket,
         key: path.sub(/^\//, ''),
@@ -107,14 +119,22 @@ class CircleFS < FuseFS::FuseDir
   end
 
   def mkdir(path)
+    @logger.debug("PUT    s3://#{@bucket}/#{path.sub(/^\//, '')}/")
     resp = @client.put_object({
       body: '',
       bucket: @bucket,
-      key: path.sub(/^\//, ''),
+      key: "#{path.sub(/^\//, '')}/",
     })
+    @cache[path.sub(/^\//, '')] = {
+      directory?: true,
+      file?: false,
+      size: 0,
+      times: INIT_TIMES,
+    }
   end
 
   def read_file(path)
+    @logger.debug("GET    s3://#{@bucket}/#{path.sub(/^\//, '')}")
     resp = @client.get_object({
       bucket: @bucket,
       key: path.sub(/^\//, ''),
@@ -123,13 +143,34 @@ class CircleFS < FuseFS::FuseDir
   end
 
   def rename(from_path, to_path)
-    false
+    if directory?(from_path)
+      objects = contents(from_path, '')
+    else
+      objects = [from_path.sub(/^\//, '')]
+    end
+    objects.each do |item|
+      key = item.sub(from_path.sub(/^\//, ''), to_path.sub(/^\//, ''))
+      @logger.debug("COPY   s3://#{@bucket}/#{item} -> s3://#{@bucket}/#{key}")
+      @client.copy_object({
+        bucket: @bucket,
+        copy_source: "/#{@bucket}/#{item}",
+        key: key,
+      })
+    end
+    @logger.debug("DELETE #{objects.map { |item| "s3://#{@bucket}/#{item}" }.join(' ')}")
+    @client.delete_objects({
+      bucket: @bucket,
+      delete: {
+        objects: objects.map { |item| { key: item } },
+      },
+    })
   end
 
   def rmdir(path)
+    @logger.debug("DELETE s3://#{@bucket}/#{path.sub(/^\//, '')}/")
     resp = @client.delete_object({
       bucket: @bucket,
-      key: path.sub(/^\//, ''),
+      key: "#{path.sub(/^\//, '')}/",
     })
   end
 
@@ -202,6 +243,7 @@ class CircleFS < FuseFS::FuseDir
   end
 
   def write_to(path, str)
+    @logger.debug("PUT    s3://#{@bucket}/#{path.sub(/^\//, '')}")
     resp = @client.put_object({
       body: str,
       bucket: @bucket,
@@ -211,5 +253,5 @@ class CircleFS < FuseFS::FuseDir
 end
 
 FuseFS.main(ARGV, [:bucket, :region]) do |options|
-  CircleFS.new(options)
+  Circus.new(options)
 end
