@@ -3,6 +3,9 @@ GEM
   specs:
     aws-eventstream (1.0.1)
     aws-partitions (1.136.0)
+    aws-sdk-cloudwatch (1.13.0)
+      aws-sdk-core (~> 3, >= 3.39.0)
+      aws-sigv4 (~> 1.0)
     aws-sdk-core (3.46.0)
       aws-eventstream (~> 1.0)
       aws-partitions (~> 1.0)
@@ -17,6 +20,7 @@ GEM
       aws-sigv4 (~> 1.0)
     aws-sigv4 (1.0.3)
     jmespath (1.4.0)
+    lru_redux (1.1.0)
     rfuse (1.1.2)
     rfusefs (1.0.3)
       rfuse (~> 1.1)
@@ -25,7 +29,9 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
+  aws-sdk-cloudwatch
   aws-sdk-s3
+  lru_redux
   rfusefs
 
 BUNDLED WITH
