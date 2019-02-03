@@ -1,6 +1,11 @@
 GEM
   remote: https://rubygems.org/
   specs:
+    activesupport (5.2.2)
+      concurrent-ruby (~> 1.0, >= 1.0.2)
+      i18n (>= 0.7, < 2)
+      minitest (~> 5.1)
+      tzinfo (~> 1.1)
     aws-eventstream (1.0.1)
     aws-partitions (1.136.0)
     aws-sdk-cloudwatch (1.13.0)
@@ -19,19 +24,29 @@ GEM
       aws-sdk-kms (~> 1)
       aws-sigv4 (~> 1.0)
     aws-sigv4 (1.0.3)
+    bigdecimal (1.4.3)
+    concurrent-ruby (1.1.4)
+    dalli (2.7.9)
+    i18n (1.5.3)
+      concurrent-ruby (~> 1.0)
     jmespath (1.4.0)
-    lru_redux (1.1.0)
+    minitest (5.11.3)
     rfuse (1.1.2)
     rfusefs (1.0.3)
       rfuse (~> 1.1)
+    thread_safe (0.3.6)
+    tzinfo (1.2.5)
+      thread_safe (~> 0.1)
 
 PLATFORMS
   ruby
 
 DEPENDENCIES
+  activesupport
   aws-sdk-cloudwatch
   aws-sdk-s3
-  lru_redux
+  bigdecimal
+  dalli
   rfusefs
 
 BUNDLED WITH

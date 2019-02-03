@@ -1,20 +1,58 @@
 require 'bundler/setup'
 
+require 'active_support'
 require 'aws-sdk-cloudwatch'
 require 'aws-sdk-s3'
-require 'lru_redux'
 require 'rfusefs'
+require 'yaml'
 
 class Circus < FuseFS::FuseDir
 
   def initialize(options)
-    @bucket = options[:bucket]
-    @region = options[:region]
-    max_size = options[:cache_size] || 1000
-    ttl = options[:cache_ttl] || 300
-    @client = Aws::S3::Client.new({ region: @region })
-    @cache = LruRedux::TTL::ThreadSafeCache.new(max_size, ttl)
-    @logger = Logger.new(STDERR, progname: self.class.name)
+    config_path = File.expand_path('../../config.yml', __FILE__)
+    config = YAML.load_file(config_path)
+
+    @bucket = config['bucket']
+    @region = config['region']
+    if config['access_key_id'] && config['secret_access_key'] then
+      credentials = Aws::Credentials.new(config['access_key_id'], config['secret_access_key'])
+      Aws.config.update({ credentials: credentials })
+    end
+    @client = Aws::S3::Client.new(region: @region || 'us-east-1')
+    unless @region then
+      resp = @client.get_bucket_location({ bucket: @bucket })
+      @region = resp.location_constraint
+      @client = Aws::S3::Client.new(region: @region)
+    end
+
+    cache_ttl = (config['cache_ttl'] || 300).to_i
+    case config['cache_driver']
+    when 'file_store'
+      cache_path = config['file_store']['directory']
+      @cache = ActiveSupport::Cache::FileStore.new(cache_path, expires_in: cache_ttl)
+    when 'mem_cache_store'
+      servers = config['mem_cache_store']['servers']
+      @cache = ActiveSupport::Cache::MemCacheStore.new(*servers, expires_in: cache_ttl)
+    when 'null_store'
+      @cache = ActiveSupport::Cache::NullStore.new
+    else
+      size = (config['memory_store']['size'].to_i || 32) * 1024 * 1024
+      @cache = ActiveSupport::Cache::MemoryStore.new(expires_in: cache_ttl, size: size)
+    end
+
+    case config['log_output']
+    when 'STDOUT'
+      logdev = STDOUT
+    when 'STDERR'
+      logdev = STDERR
+    when 'NONE'
+      logdev = '/dev/null'
+    else
+      logdev = config['log_output'] || '/dev/null'
+    end
+    log_level = config['log_level'] || 'WARN'
+    log_progname = config['log_progname'] || self.class.name
+    @logger = Logger.new(logdev, level: log_level, progname: log_progname)
   end
 
   def can_delete?(path)
@@ -43,25 +81,23 @@ class Circus < FuseFS::FuseDir
       prefix: prefix,
     })
     files = resp.contents
-    if delimiter == '/'
-      files.reject! { |item| item.key == prefix }
-    end
+    files.reject! { |item| item.key == prefix } if delimiter == '/'
     files.map! do |item|
-      @cache[item.key] = {
+      @cache.write(item.key, {
         directory?: false,
         file?: true,
         size: item.size,
         times: Array.new(3, item.last_modified),
-      }
+      })
       delimiter == '/' ? File.basename(item.key) : item.key
     end
     directories = resp.common_prefixes.map do |item|
-      @cache[item.prefix.sub(/\/$/, '')] = {
+      @cache.write(item.prefix.sub(/\/$/, ''), {
         directory?: true,
         file?: false,
         size: 0,
         times: INIT_TIMES,
-      }
+      })
       delimiter == '/' ? File.basename(item.prefix) : item.prefix
     end
     files + directories
@@ -69,9 +105,7 @@ class Circus < FuseFS::FuseDir
 
   def delete(path)
     key = path.sub(/^\//, '')
-    if @cache.has_key?(path.sub(/^\//, ''))
-      key << '/' if @cache[path.sub(/^\//, '')][:directory?]
-    end
+    key << '/' if directory?(path)
     @logger.debug("DELETE s3://#{@bucket}/#{key}")
     resp = @client.delete_object({
       bucket: @bucket,
@@ -80,9 +114,6 @@ class Circus < FuseFS::FuseDir
   end
 
   def directory?(path)
-    if @cache.has_key?(path.sub(/^\//, ''))
-      return @cache[path.sub(/^\//, '')][:directory?]
-    end
     getattr(path)[:directory?]
   end
 
@@ -91,30 +122,29 @@ class Circus < FuseFS::FuseDir
   end
 
   def file?(path)
-    if @cache.has_key?(path.sub(/^\//, ''))
-      return @cache[path.sub(/^\//, '')][:file?]
-    end
     getattr(path)[:file?]
   end
 
   def getattr(path)
-    begin
-      @logger.debug("HEAD   s3://#{@bucket}/#{path.sub(/^\//, '')}")
-      resp = @client.head_object({
-        bucket: @bucket,
-        key: path.sub(/^\//, ''),
-      })
-      @cache[path.sub(/^\//, '')] = {
-        directory?: false,
-        file?: true,
-        size: resp.content_length,
-        times: Array.new(3, resp.last_modified),
-      }
-    rescue Aws::S3::Errors::NotFound
-      {
-        directory?: false,
-        file?: false,
-      }
+    @cache.fetch(path.sub(/^\//, '')) do
+      begin
+        @logger.debug("HEAD   s3://#{@bucket}/#{path.sub(/^\//, '')}")
+        resp = @client.head_object({
+          bucket: @bucket,
+          key: path.sub(/^\//, ''),
+        })
+        {
+          directory?: false,
+          file?: true,
+          size: resp.content_length,
+          times: Array.new(3, resp.last_modified),
+        }
+      rescue Aws::S3::Errors::NotFound
+        {
+          directory?: false,
+          file?: false,
+        }
+      end
     end
   end
 
@@ -125,12 +155,12 @@ class Circus < FuseFS::FuseDir
       bucket: @bucket,
       key: "#{path.sub(/^\//, '')}/",
     })
-    @cache[path.sub(/^\//, '')] = {
+    @cache.write(path.sub(/^\//, ''), {
       directory?: true,
       file?: false,
       size: 0,
       times: INIT_TIMES,
-    }
+    })
   end
 
   def read_file(path)
@@ -143,7 +173,7 @@ class Circus < FuseFS::FuseDir
   end
 
   def rename(from_path, to_path)
-    if directory?(from_path)
+    if directory?(from_path) then
       objects = contents(from_path, '')
     else
       objects = [from_path.sub(/^\//, '')]
@@ -175,14 +205,11 @@ class Circus < FuseFS::FuseDir
   end
 
   def size(path)
-    if @cache.has_key?(path.sub(/^\//, ''))
-      return @cache[path.sub(/^\//, '')][:size]
-    end
     getattr(path)[:size]
   end
 
   def statistics(path)
-    client = Aws::CloudWatch::Client.new({ region: @region })
+    client = Aws::CloudWatch::Client.new
     resp = client.get_metric_data({
       metric_data_queries: [{
         id: 'bucketSizeBytes',
@@ -219,22 +246,19 @@ class Circus < FuseFS::FuseDir
           stat: 'Average',
         },
       }],
-      start_time: Time.now - 14 * 86400,
+      start_time: Time.now - 14.days,
       end_time: Time.now,
     })
     [
       resp.metric_data_results[0].values[0].to_i,
       resp.metric_data_results[1].values[0].to_i,
-      1024 ** 5,
-      1024 ** 5,
+      1.petabytes,
+      1.petabytes,
     ]
   end
 
   def times(path)
     return INIT_TIMES if path == '/'
-    if @cache.has_key?(path.sub(/^\//, ''))
-      return @cache[path.sub(/^\//, '')][:times]
-    end
     getattr(path)[:times]
   end
 
@@ -252,6 +276,3 @@ class Circus < FuseFS::FuseDir
   end
 end
 
-FuseFS.main(ARGV, [:bucket, :region]) do |options|
-  Circus.new(options)
-end

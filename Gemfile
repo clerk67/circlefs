@@ -1,6 +1,8 @@
 source "https://rubygems.org"
 
+gem "activesupport"
 gem "aws-sdk-cloudwatch"
 gem "aws-sdk-s3"
-gem "lru_redux"
+gem "bigdecimal"
+gem "dalli"
 gem "rfusefs"
