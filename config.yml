@@ -24,7 +24,7 @@ bucket: examplebucket
 #
 #access_key_id: AKIAIOSFODNN7EXAMPLE
 
-# access_key_id [optional]
+# secret_access_key [optional]
 # The AWS secret access key which is required to access your AWS resources.
 # If not specified, the default credential profiles file (typically located at
 # ~/.aws/credentials) or Amazon EC2 instance profile credentials will be used.
@@ -32,7 +32,7 @@ bucket: examplebucket
 #secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
 # log_output [optional]
-# The name of the file where errors should be logged. If the special value
+# The path to the file where errors should be logged. If the special value
 # "STDOUT" or "STDERR" is used, the errors are sent to stdout or stderr instead.
 # The special value "NONE" can be used to disable logging (This is default).
 #
@@ -40,8 +40,8 @@ bucket: examplebucket
 
 # log_level [optional]
 # The severity threshold of logging. You can give one of the following levels:
-# "FATAL", "ERROR", "WARN", "INFO", and "DEBUG", and only messages at that level
-# or higher will be printed. The default level is "WARN".
+# "FATAL", "ERROR", "WARN", "INFO", and "DEBUG". Only messages at that level or
+# higher will be logged. The default level is "WARN".
 #
 #log_level: DEBUG
 
@@ -55,8 +55,8 @@ bucket: examplebucket
 #cache_driver: memory_store
 
 # cache_ttl [optional]
-# The number of seconds for which objects' attributes should be cached.
-# By default, Circus is configured to cache each data for 300 seconds.
+# The number of seconds for which objects' attributes should be cached. This
+# value must be larger than zero. The default value is 300 (5 minutes).
 #
 #cache_ttl: 300
 
