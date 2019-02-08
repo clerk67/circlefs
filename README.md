@@ -77,15 +77,72 @@ git clone https://github.com/clerk67/circus && cd circus
 # install rubygems
 bundle install
 
-# configure circus
-vim config.yml
-
 # create mountpoint
 mkdir mountpoint
 
-# mount bucket (as a background process)
-bin/circus mountpoint &
+# mount bucket
+bin/circus examplebucket mountpoint -o _netdev,rw,allow_other
 
 # list bucket contents
 ls mountpoint
+
+# unmount bucket
+fusermount -u mountpoint
 ```
+
+You can use `mount` command by creating symbolic link in `/usr/sbin`.
+
+```bash
+sudo ln -s /usr/sbin/mount.s3 /path/to/circus
+
+mount -t s3 examplebucket /path/to/mountpoint -o _netdev,rw,allow_other
+```
+
+To mount your Amazon S3 bucket on system startup, add the following line to `/etc/fstab`:
+
+```
+/path/to/circus#examplebucket /path/to/mountpoint fuse _netdev,rw,allow_other 0 0
+```
+
+## Command Line Options
+
+- `-o OPTIONS`
+
+    The mount options that would be passed to the `mount` command.
+
+- `--region REGION`
+
+    The name of AWS Region where your Amazon S3 bucket is located. If not specified, Circus will automatically detect the location of you bucket.
+
+- `--log_output PATH`
+
+    The path to the file where errors should be logged. If the special value `STDOUT` or `STDERR` is used, the errors are sent to stdout or stderr instead. By default, logging is disabled.
+
+- `--log_level LEVEL`
+
+    The severity threshold of logging. You can give one of the following levels: `FATAL`, `ERROR`, `WARN` (default), `INFO`, and `DEBUG`. Only messages at that level or higher will be logged.
+
+- `--cache TYPE[:OPTIONS]`
+
+    Select cache driver you would like to be used for caching objects' attributes. By default, Circus is configured to use the `memory` store. The valid values are:
+
+    - `file[:DIR_PATH]`
+
+        uses the local file system to store data. `DIR_PATH` represents the path to the directory where the store files will be stored (default: `/tmp/cache`).
+
+    - `memory[:MAX_SIZE]`
+
+        keeps data in memory in the same Circus process. `MAX_SIZE` represents the bounded size (in megabytes) of the cache store (default: 32 MB).
+
+    - `memcached:HOST:PORT[:HOST:PORT ...]`
+
+        uses memcached server to provide a centralized cache. `HOST:PORT` represents the addresses for all memcached servers in your cluster (default: 'localhost:11211').
+
+- `--cache_ttl NUMBER`
+
+    The number of seconds for which objects' attributes should be cached. This value must be larger than zero. The default value is 300 (5 minutes).
+
+- `--access_key_id STRING`
+- `--secret_access_key KEY`
+
+    The AWS credentials which is required to access your AWS resources. If not specified, the default credential profiles file (typically located at `~/.aws/credentials`) or Amazon EC2 instance profile credentials will be used. (**WARNING:** This is convenient but insecure. On some systems, your password becomes visible to system status programs such as `ps` that may be invoked by other users to display command lines. You should consider using environment variables or Amazon EC2 instance profiles instead.)

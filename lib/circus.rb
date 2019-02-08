@@ -1,21 +1,24 @@
 require 'bundler/setup'
 
 require 'active_support'
+require 'active_support/core_ext'
 require 'aws-sdk-cloudwatch'
 require 'aws-sdk-s3'
 require 'rfusefs'
-require 'yaml'
 
 class Circus < FuseFS::FuseDir
 
   def initialize(options)
-    config_path = File.expand_path('../../config.yml', __FILE__)
-    config = YAML.load_file(config_path)
+    logdev = options[:log_output] || '/dev/null'
+    logdev = STDOUT if logdev == 'STDOUT'
+    logdev = STDERR if logdev == 'STDERR'
+    level = options[:log_level]
+    @logger = Logger.new(logdev, level: level, progname: self.class.name)
 
-    @bucket = config['bucket']
-    @region = config['region']
-    if config['access_key_id'] && config['secret_access_key'] then
-      credentials = Aws::Credentials.new(config['access_key_id'], config['secret_access_key'])
+    @bucket = options[:bucket]
+    @region = options[:region]
+    if options[:access_key_id] && options[:secret_access_key] then
+      credentials = Aws::Credentials.new(options[:access_key_id], options[:secret_access_key])
       Aws.config.update({ credentials: credentials })
     end
     @client = Aws::S3::Client.new(region: @region || 'us-east-1')
@@ -25,34 +28,21 @@ class Circus < FuseFS::FuseDir
       @client = Aws::S3::Client.new(region: @region)
     end
 
-    cache_ttl = (config['cache_ttl'] || 300).to_i
-    case config['cache_driver']
-    when 'file_store'
-      cache_path = config['file_store']['directory']
+    cache_ttl = options[:cache_ttl].to_i
+    case options[:cache]
+    when /^file:?(.*)$/
+      cache_path = $1.presence || '/tmp/cache'
       @cache = ActiveSupport::Cache::FileStore.new(cache_path, expires_in: cache_ttl)
-    when 'mem_cache_store'
-      servers = config['mem_cache_store']['servers']
+    when /^memcached:?(.*)$/
+      servers = ($1.presence || 'localhost:11211').gsub(/(:\d+):/, '\1,').split(',')
       @cache = ActiveSupport::Cache::MemCacheStore.new(*servers, expires_in: cache_ttl)
-    when 'null_store'
-      @cache = ActiveSupport::Cache::NullStore.new
-    else
-      size = (config['memory_store']['size'].to_i || 32) * 1024 * 1024
+    when /^memory:?(.*)$/
+      size = ($1.presence || 32).to_i * 1024 * 1024
       @cache = ActiveSupport::Cache::MemoryStore.new(expires_in: cache_ttl, size: size)
-    end
-
-    case config['log_output']
-    when 'STDOUT'
-      logdev = STDOUT
-    when 'STDERR'
-      logdev = STDERR
-    when 'NONE'
-      logdev = '/dev/null'
     else
-      logdev = config['log_output'] || '/dev/null'
+      puts "#{self.class.name}: invalid cache driver (#{options[:cache]})"
+      exit!
     end
-    log_level = config['log_level'] || 'WARN'
-    log_progname = config['log_progname'] || self.class.name
-    @logger = Logger.new(logdev, level: log_level, progname: log_progname)
   end
 
   def can_delete?(path)
