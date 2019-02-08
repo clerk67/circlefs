@@ -6,7 +6,7 @@ FUSE-based file system backed by Amazon S3
 
 ## Features
 
-- **Unlimited storage capacity** provided with Amazon S3
+- **Unlimited storage capacity** provided by Amazon S3
 - Support renaming of files and directories (including **non-empty directories**)
 - Support caching object attributes to reduce requests and improve performance
 - Support **external memcached cluster** as cache store to share data among multiple clients
@@ -93,8 +93,10 @@ fusermount -u mountpoint
 You can use `mount` command by creating symbolic link in `/usr/sbin`.
 
 ```bash
+# create symbolic link
 sudo ln -s /usr/sbin/mount.s3 /path/to/circus
 
+# mount bucket
 mount -t s3 examplebucket /path/to/mountpoint -o _netdev,rw,allow_other
 ```
 
@@ -112,7 +114,7 @@ To mount your Amazon S3 bucket on system startup, add the following line to `/et
 
 - `--region REGION`
 
-    The name of AWS Region where your Amazon S3 bucket is located. If not specified, Circus will automatically detect the location of you bucket.
+    The name of AWS Region where your Amazon S3 bucket is located. If not specified, Circus will automatically detect the location of your bucket.
 
 - `--log_output PATH`
 
@@ -145,4 +147,6 @@ To mount your Amazon S3 bucket on system startup, add the following line to `/et
 - `--access_key_id STRING`
 - `--secret_access_key KEY`
 
-    The AWS credentials which is required to access your AWS resources. If not specified, the default credential profiles file (typically located at `~/.aws/credentials`) or Amazon EC2 instance profile credentials will be used. (**WARNING:** This is convenient but insecure. On some systems, your password becomes visible to system status programs such as `ps` that may be invoked by other users to display command lines. You should consider using environment variables or Amazon EC2 instance profiles instead.)
+    The AWS credentials which is required to access your AWS resources. If not specified, the default credential profiles file (typically located at `~/.aws/credentials`) or Amazon EC2 instance profile credentials will be used.
+
+    **WARNING:** This is convenient but insecure. On some systems, your password becomes visible to system status programs such as `ps` that may be invoked by other users to display command lines. You should consider using environment variables or Amazon EC2 instance profiles instead.
