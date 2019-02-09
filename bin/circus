@@ -1,64 +1,6 @@
 #!/usr/bin/env ruby
 
-require 'optparse'
 require_relative '../lib/circus.rb'
 
-VERSION = '0.1.0'
-
-options = {
-  :_netdev => true,
-  :access_key_id => nil,
-  :allow_other => true,
-  :bucket => nil,
-  :cache => 'memory',
-  :cache_ttl => 300,
-  :log_level => 'WARN',
-  :log_output => nil,
-  :region => nil,
-  :secret_access_key => nil,
-  :rw => true,
-}
-
-optval = []
-opt = OptionParser.new
-opt.on('-o OPTIONS', 'The mount options that would be passed to the mount command.') do |value|
-  optval << value
-end
-opt.on('-r', '--region REGION', 'The name of AWS Region where your Amazon S3 bucket is located.') do |value|
-  options[:region] = value
-end
-opt.on('-l', '--log_output PATH', 'The path to the file where errors should be logged (or STDOUT, STDERR).') do |value|
-  options[:log_output] = value
-end
-opt.on('-v', '--log_level LEVEL', 'The severity threshold of logging (levels: FATAL, ERROR, WARN, INFO, DEBUG).') do |value|
-  options[:log_level] = value
-end
-opt.on('-c', '--cache TYPE[:OPTIONS]', 'The cache driver you would like to be used for caching objects\' attributes.') do |value|
-  options[:cache] = value
-end
-opt.on('-t', '--cache_ttl NUMBER', 'The number of seconds for which objects\' attributes should be cached.') do |value|
-  options[:cache_ttl] = value
-end
-opt.on('--access_key_id STRING', 'The AWS access key ID which is required to access your AWS resources.') do |value|
-  options[:access_key_id] = value
-end
-opt.on('--secret_access_key KEY', 'The AWS secret access key which is required to access your AWS resources.') do |value|
-  options[:secret_access_key] = value
-end
-opt.banner << ' bucket mountpoint'
-opt.version = VERSION
-opt.parse!(ARGV)
-
-mountpoint = ARGV[1]
-options[:bucket] = ARGV[0]
-options.each do |key, value|
-  if value == true then
-    optval << "#{key}"
-  elsif value
-    optval << "#{key}=#{value}"
-  end
-end
-
-argv = [mountpoint, '-o', optval.join(',')]
-root = Circus.new(RFuse.parse_options(argv, *options.keys))
-FuseFS.mount(root, mountpoint)
+options, mountpoint = Circus.parse_options(ARGV)
+Circus.mount(Circus.new(options), mountpoint)
