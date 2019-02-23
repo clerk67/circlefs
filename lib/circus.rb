@@ -286,11 +286,14 @@ class Circus < FuseFS::FuseDir
     end
     return {
       mode: mode,
-      buffer: StringIO.new
+      buffer: StringIO.new,
     }
   rescue Aws::S3::Errors::ServiceError
     @logger.error($!.message)
-    return true
+    return {
+      mode: mode,
+      buffer: StringIO.new,
+    }
   end
 
   def raw_read(path, offset, size, raw = nil)
