@@ -144,7 +144,7 @@ class Circus < FuseFS::FuseDir
     files = resp.contents
     files.reject! { |item| item.key == prefix } if delimiter == '/'
     files.map! do |item|
-      @cache.write(item.key, {
+      @cache.write("#{@bucket}/#{item.key}", {
         directory?: false,
         file?: true,
         size: item.size,
@@ -153,7 +153,7 @@ class Circus < FuseFS::FuseDir
       delimiter == '/' ? File.basename(item.key) : item.key
     end
     directories = resp.common_prefixes.map do |item|
-      @cache.write(item.prefix.sub(/\/$/, ''), {
+      @cache.write("#{@bucket}/#{item.prefix.sub(/\/$/, '')}", {
         directory?: true,
         file?: false,
         size: 0,
@@ -176,7 +176,7 @@ class Circus < FuseFS::FuseDir
       bucket: @bucket,
       key: key,
     })
-    @cache.delete(key)
+    @cache.delete("#{@bucket}/#{key}")
   rescue Aws::S3::Errors::ServiceError
     @logger.error($!.message)
   end
@@ -194,30 +194,36 @@ class Circus < FuseFS::FuseDir
   end
 
   def getattr(path)
-    @cache.fetch(path.sub(/^\//, '')) do
-      begin
-        @counter[:HEAD] += 1
-        @logger.info("HEAD   s3://#{@bucket}/#{path.sub(/^\//, '')}")
-        resp = @client.head_object({
-          bucket: @bucket,
-          key: path.sub(/^\//, ''),
-        })
-        return {
-          directory?: false,
-          file?: true,
-          size: resp.content_length,
-          times: Array.new(3, resp.last_modified),
-        }
-      rescue Aws::S3::Errors::NotFound
-        return {
-          directory?: false,
-          file?: false,
-        }
-      rescue Aws::S3::Errors::ServiceError
-        @logger.error($!.message)
-        raise $!
-      end
+    key = path.sub(/^\//, '')
+    if @cache.exist?("#{@bucket}/#{key}") then
+      return @cache.read("#{@bucket}/#{key}")
     end
+    @counter[:HEAD] += 1
+    @logger.info("HEAD   s3://#{@bucket}/#{key}")
+    resp = @client.head_object({
+      bucket: @bucket,
+      key: key,
+    })
+    attr = {
+      directory?: false,
+      file?: true,
+      size: resp.content_length,
+      times: Array.new(3, resp.last_modified),
+    }
+    @cache.write("#{@bucket}/#{key}", attr)
+    return attr
+  rescue Aws::S3::Errors::NotFound
+    contents = contents(File.dirname(path))
+    if @cache.exist?("#{@bucket}/#{key}")
+      return @cache.read("#{@bucket}/#{key}")
+    end
+    return {
+      directory?: false,
+      file?: false,
+    }
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
+    raise $!
   end
 
   def mkdir(path)
@@ -228,7 +234,7 @@ class Circus < FuseFS::FuseDir
       bucket: @bucket,
       key: "#{path.sub(/^\//, '')}/",
     })
-    @cache.write(path.sub(/^\//, ''), {
+    @cache.write("#{@bucket}/#{path.sub(/^\//, '')}", {
       directory?: true,
       file?: false,
       size: 0,
@@ -252,7 +258,7 @@ class Circus < FuseFS::FuseDir
           bucket: @bucket,
           key: path.sub(/^\//, ''),
         })
-        @cache.write(path.sub(/^\//, ''), {
+        @cache.write("#{@bucket}/#{path.sub(/^\//, '')}", {
           directory?: false,
           file?: true,
           size: tempfile.size,
@@ -277,12 +283,11 @@ class Circus < FuseFS::FuseDir
         mode: mode,
         buffer: resp.body,
       }
-    else
-      return {
-        mode: mode,
-        buffer: StringIO.new
-      }
     end
+    return {
+      mode: mode,
+      buffer: StringIO.new
+    }
   rescue Aws::S3::Errors::ServiceError
     @logger.error($!.message)
     return true
@@ -290,7 +295,7 @@ class Circus < FuseFS::FuseDir
 
   def raw_read(path, offset, size, raw = nil)
     @logger.debug("raw_read: path=#{path}, offset=#{offset}, size=#{size}, raw=#{raw}")
-    return raw[:buffer].read(size)
+    return raw[:buffer].read(size) || ''
   end
 
   def raw_write(path, offset, size, buffer, raw = nil)
@@ -313,7 +318,7 @@ class Circus < FuseFS::FuseDir
         copy_source: "/#{@bucket}/#{item}",
         key: key,
       })
-      @cache.write(key, getattr(item))
+      @cache.write("#{@bucket}/#{key}", getattr(item))
     end
     @counter[:DELETE] += objects.size
     @logger.info("DELETE #{objects.map { |item| "s3://#{@bucket}/#{item}" }.join(' ')}")
@@ -323,7 +328,7 @@ class Circus < FuseFS::FuseDir
         objects: objects.map { |item| { key: item } },
       },
     })
-    objects.each { |item| @cache.delete(item) }
+    objects.each { |item| @cache.delete("#{@bucket}/#{item.sub(/\/$/, '')}") }
   rescue Aws::S3::Errors::ServiceError
     @logger.error($!.message)
   end
@@ -335,7 +340,7 @@ class Circus < FuseFS::FuseDir
       bucket: @bucket,
       key: "#{path.sub(/^\//, '')}/",
     })
-    @cache.delete("#{path.sub(/^\//, '')}/")
+    @cache.delete("#{@bucket}/#{path.sub(/^\//, '')}")
   rescue Aws::S3::Errors::ServiceError
     @logger.error($!.message)
   end
@@ -425,7 +430,9 @@ class Circus < FuseFS::FuseDir
     return getattr(path)[:times]
   end
 
-  def touch(path)
+  def xattr(path)
+    @logger.debug("xattr: path=#{path}")
+    return { circus: VERSION }
   end
 end
 
