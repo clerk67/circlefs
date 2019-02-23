@@ -30,6 +30,8 @@ class Circus < FuseFS::FuseDir
       @region = resp.location_constraint
       @client = Aws::S3::Client.new(region: @region)
     end
+    @mounted_at = Time.now
+    @counter = Hash.new(0)
 
     cache_ttl = options[:cache_ttl].to_i
     case options[:cache]
@@ -101,9 +103,8 @@ class Circus < FuseFS::FuseDir
         optval << "#{key}=#{value}"
       end
     end
-
     options = RFuse.parse_options(%W(#{mountpoint} -o #{optval.join(',')}), *options.keys)
-    [options, mountpoint]
+    return [options, mountpoint]
   end
 
   def self.mount(root, mountpoint)
@@ -115,25 +116,26 @@ class Circus < FuseFS::FuseDir
   end
 
   def can_delete?(path)
-    true
+    return true
   end
 
   def can_mkdir?(path)
-    true
+    return true
   end
 
   def can_rmdir?(path)
-    true
+    return true
   end
 
   def can_write?(path)
-    true
+    return true
   end
 
   def contents(path, delimiter = '/')
     prefix = path.sub(/^\//, '')
     prefix << '/' unless path == '/'
-    @logger.debug("LIST   s3://#{@bucket}/#{prefix}")
+    @counter[:LIST] += 1
+    @logger.info("LIST   s3://#{@bucket}/#{prefix}")
     resp = @client.list_objects_v2({
       bucket: @bucket,
       delimiter: delimiter,
@@ -159,57 +161,69 @@ class Circus < FuseFS::FuseDir
       })
       delimiter == '/' ? File.basename(item.prefix) : item.prefix
     end
-    files + directories
+    return files + directories
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
+    return nil
   end
 
   def delete(path)
     key = path.sub(/^\//, '')
     key << '/' if directory?(path)
-    @logger.debug("DELETE s3://#{@bucket}/#{key}")
-    resp = @client.delete_object({
+    @counter[:DELETE] += 1
+    @logger.info("DELETE s3://#{@bucket}/#{key}")
+    @client.delete_object({
       bucket: @bucket,
       key: key,
     })
+    @cache.delete(key)
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
   end
 
   def directory?(path)
-    getattr(path)[:directory?]
+    return getattr(path)[:directory?]
   end
 
   def executable?(path)
-    false
+    return false
   end
 
   def file?(path)
-    getattr(path)[:file?]
+    return getattr(path)[:file?]
   end
 
   def getattr(path)
     @cache.fetch(path.sub(/^\//, '')) do
       begin
-        @logger.debug("HEAD   s3://#{@bucket}/#{path.sub(/^\//, '')}")
+        @counter[:HEAD] += 1
+        @logger.info("HEAD   s3://#{@bucket}/#{path.sub(/^\//, '')}")
         resp = @client.head_object({
           bucket: @bucket,
           key: path.sub(/^\//, ''),
         })
-        {
+        return {
           directory?: false,
           file?: true,
           size: resp.content_length,
           times: Array.new(3, resp.last_modified),
         }
       rescue Aws::S3::Errors::NotFound
-        {
+        return {
           directory?: false,
           file?: false,
         }
+      rescue Aws::S3::Errors::ServiceError
+        @logger.error($!.message)
+        raise $!
       end
     end
   end
 
   def mkdir(path)
-    @logger.debug("PUT    s3://#{@bucket}/#{path.sub(/^\//, '')}/")
-    resp = @client.put_object({
+    @counter[:PUT] += 1
+    @logger.info("PUT    s3://#{@bucket}/#{path.sub(/^\//, '')}/")
+    @client.put_object({
       body: '',
       bucket: @bucket,
       key: "#{path.sub(/^\//, '')}/",
@@ -220,15 +234,68 @@ class Circus < FuseFS::FuseDir
       size: 0,
       times: INIT_TIMES,
     })
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
   end
 
-  def read_file(path)
-    @logger.debug("GET    s3://#{@bucket}/#{path.sub(/^\//, '')}")
-    resp = @client.get_object({
-      bucket: @bucket,
-      key: path.sub(/^\//, ''),
-    })
-    resp.body.read
+  def raw_close(path, raw = nil)
+    @logger.debug("raw_close: path=#{path}, raw=#{raw}")
+    if raw[:mode] === 'w' || raw[:mode] === 'rw' then
+      Tempfile.open do |tempfile|
+        tempfile.binmode
+        tempfile.write(raw[:buffer].string)
+        tempfile.read
+        @counter[:PUT] += 1
+        @logger.info("PUT    s3://#{@bucket}/#{path.sub(/^\//, '')}")
+        @client.put_object({
+          body: IO.read(tempfile),
+          bucket: @bucket,
+          key: path.sub(/^\//, ''),
+        })
+        @cache.write(path.sub(/^\//, ''), {
+          directory?: false,
+          file?: true,
+          size: tempfile.size,
+          times: Array.new(3, Time.now),
+        })
+      end
+    end
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
+  end
+
+  def raw_open(path, mode, rfusefs = nil)
+    @logger.debug("raw_open: path=#{path}, mode=#{mode}, rfusefs=#{rfusefs}")
+    if mode === 'r' || mode === 'rw' then
+      @counter[:GET] += 1
+      @logger.info("GET    s3://#{@bucket}/#{path.sub(/^\//, '')}")
+      resp = @client.get_object({
+        bucket: @bucket,
+        key: path.sub(/^\//, ''),
+      })
+      return {
+        mode: mode,
+        buffer: resp.body,
+      }
+    else
+      return {
+        mode: mode,
+        buffer: StringIO.new
+      }
+    end
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
+    return true
+  end
+
+  def raw_read(path, offset, size, raw = nil)
+    @logger.debug("raw_read: path=#{path}, offset=#{offset}, size=#{size}, raw=#{raw}")
+    return raw[:buffer].read(size)
+  end
+
+  def raw_write(path, offset, size, buffer, raw = nil)
+    @logger.debug("raw_write: path=#{path}, offset=#{offset}, size=#{size}, raw=#{raw}")
+    raw[:buffer].write(buffer)
   end
 
   def rename(from_path, to_path)
@@ -239,36 +306,70 @@ class Circus < FuseFS::FuseDir
     end
     objects.each do |item|
       key = item.sub(from_path.sub(/^\//, ''), to_path.sub(/^\//, ''))
-      @logger.debug("COPY   s3://#{@bucket}/#{item} -> s3://#{@bucket}/#{key}")
+      @counter[:COPY] += 1
+      @logger.info("COPY   s3://#{@bucket}/#{item} -> s3://#{@bucket}/#{key}")
       @client.copy_object({
         bucket: @bucket,
         copy_source: "/#{@bucket}/#{item}",
         key: key,
       })
+      @cache.write(key, getattr(item))
     end
-    @logger.debug("DELETE #{objects.map { |item| "s3://#{@bucket}/#{item}" }.join(' ')}")
+    @counter[:DELETE] += objects.size
+    @logger.info("DELETE #{objects.map { |item| "s3://#{@bucket}/#{item}" }.join(' ')}")
     @client.delete_objects({
       bucket: @bucket,
       delete: {
         objects: objects.map { |item| { key: item } },
       },
     })
+    objects.each { |item| @cache.delete(item) }
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
   end
 
   def rmdir(path)
-    @logger.debug("DELETE s3://#{@bucket}/#{path.sub(/^\//, '')}/")
-    resp = @client.delete_object({
+    @counter[:DELETE] += 1
+    @logger.info("DELETE s3://#{@bucket}/#{path.sub(/^\//, '')}/")
+    @client.delete_object({
       bucket: @bucket,
       key: "#{path.sub(/^\//, '')}/",
     })
+    @cache.delete("#{path.sub(/^\//, '')}/")
+  rescue Aws::S3::Errors::ServiceError
+    @logger.error($!.message)
   end
 
   def size(path)
-    getattr(path)[:size]
+    return getattr(path)[:size]
   end
 
   def statistics(path)
-    client = Aws::CloudWatch::Client.new
+    total_requests = 0
+    total_costs = 0
+    @logger.info('========== S3 Request Statistics ==========')
+    @logger.info("since #{@mounted_at.strftime('%FT%T.%6N')}")
+    @counter.each do |key, value|
+      case key
+      when :COPY, :LIST, :POST, :PUT
+        cost = value * 0.0047 / 1000
+        @logger.info(sprintf("%-6s %10d requests %12.7f USD", key, value, cost))
+        total_requests += value
+        total_costs += cost
+      when :HEAD, :GET
+        cost = value * 0.00037 / 1000
+        @logger.info(sprintf("%-6s %10d requests %12.7f USD", key, value, cost))
+        total_requests += value
+        total_costs += cost
+      when :DELETE
+        @logger.info(sprintf("%-6s %10d requests %12.7f USD", key, value, 0))
+        total_requests += value
+      end
+    end
+    @logger.info(sprintf("%-6s %10d requests %12.7f USD", 'TOTAL', total_requests, total_costs))
+    @logger.info('===========================================')
+
+    client = Aws::CloudWatch::Client.new(region: @region)
     resp = client.get_metric_data({
       metric_data_queries: [{
         id: 'bucketSizeBytes',
@@ -308,30 +409,23 @@ class Circus < FuseFS::FuseDir
       start_time: Time.now - 14.days,
       end_time: Time.now,
     })
-    [
+    return [
       resp.metric_data_results[0].values[0].to_i,
       resp.metric_data_results[1].values[0].to_i,
       1.petabytes,
       1.petabytes,
     ]
+  rescue Aws::CloudWatch::Errors::ServiceError
+    @logger.error($!.message)
+    return Array.new(4, 0)
   end
 
   def times(path)
     return INIT_TIMES if path == '/'
-    getattr(path)[:times]
+    return getattr(path)[:times]
   end
 
   def touch(path)
-    write_to(path, '')
-  end
-
-  def write_to(path, str)
-    @logger.debug("PUT    s3://#{@bucket}/#{path.sub(/^\//, '')}")
-    resp = @client.put_object({
-      body: str,
-      bucket: @bucket,
-      key: path.sub(/^\//, ''),
-    })
   end
 end
 
